@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QLineEdit,
+    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -110,6 +111,8 @@ class AnimationDialog(QDialog):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Parapara Animator")
+        self.setWindowFlag(Qt.WindowMinimizeButtonHint, True)
+        self.setWindowFlag(Qt.WindowMaximizeButtonHint, True)
         self.resize(820, 520)
 
         self.frames: List[AnimationFrame] = []
@@ -173,10 +176,23 @@ class AnimationDialog(QDialog):
         self.display_label.setStyleSheet(
             "background-color: #202020; border: 1px solid #3a3a3a; color: #aaaaaa;"
         )
+        self.zoom_spin = QSpinBox()
+        self.zoom_spin.setRange(10, 800)
+        self.zoom_spin.setSingleStep(10)
+        self.zoom_spin.setValue(100)
+        self.zoom_spin.setSuffix("%")
+        zoom_layout = QHBoxLayout()
+        zoom_layout.addWidget(QLabel("表示倍率:"))
+        zoom_layout.addWidget(self.zoom_spin)
+        zoom_layout.addStretch(1)
+
+        display_layout = QVBoxLayout()
+        display_layout.addWidget(self.display_label, 1)
+        display_layout.addLayout(zoom_layout)
 
         main_layout.addLayout(control_layout, 0, 0)
         main_layout.addLayout(table_layout, 0, 1)
-        main_layout.addWidget(self.display_label, 0, 2)
+        main_layout.addLayout(display_layout, 0, 2)
         main_layout.setColumnStretch(1, 1)
         main_layout.setColumnStretch(2, 2)
 
@@ -187,6 +203,7 @@ class AnimationDialog(QDialog):
         self.start_button.clicked.connect(self.start_animation)
         self.stop_button.clicked.connect(self.stop_animation)
         self.step_button.clicked.connect(self.step_frame)
+        self.zoom_spin.valueChanged.connect(self._on_zoom_changed)
         selection_model = self.table.selectionModel()
         if selection_model:
             selection_model.selectionChanged.connect(self._on_selection_changed)
@@ -364,9 +381,23 @@ class AnimationDialog(QDialog):
             return
 
         pixmap = self.current_pixmap
+        fit_ratio = min(
+            1.0,
+            target_size.width() / pixmap.width(),
+            target_size.height() / pixmap.height(),
+        )
+        zoom_ratio = self.zoom_spin.value() / 100.0
+        scale_ratio = max(0.01, fit_ratio * zoom_ratio)
+        scaled_width = max(1, int(round(pixmap.width() * scale_ratio)))
+        scaled_height = max(1, int(round(pixmap.height() * scale_ratio)))
         scaled = pixmap
-        if pixmap.width() > target_size.width() or pixmap.height() > target_size.height():
-            scaled = pixmap.scaled(target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        if scaled_width != pixmap.width() or scaled_height != pixmap.height():
+            scaled = pixmap.scaled(
+                scaled_width,
+                scaled_height,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            )
 
         canvas = QPixmap(target_size)
         canvas.fill(Qt.transparent)
@@ -408,6 +439,9 @@ class AnimationDialog(QDialog):
             return
         self.current_index = row
         self._display_current_frame()
+
+    def _on_zoom_changed(self, _value: int) -> None:
+        self._refresh_display()
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
