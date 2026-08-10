@@ -12,10 +12,12 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QDialog,
+    QFileDialog,
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QMessageBox,
     QPushButton,
     QSizePolicy,
     QLineEdit,
@@ -32,6 +34,72 @@ class AnimationFrame:
     path: str
     pixmap: QPixmap
     wait_ms: int
+    display_name: str = ""
+
+
+def calculate_frame_rects(
+    image_width: int,
+    image_height: int,
+    rows: int,
+    columns: int,
+) -> List[tuple[int, int, int, int]]:
+    """画像全体を覆うフレーム矩形を行優先の順序で返す。"""
+    if image_width <= 0 or image_height <= 0:
+        raise ValueError("画像サイズは 1 ピクセル以上である必要があります。")
+    if rows <= 0 or columns <= 0:
+        raise ValueError("縦と横の枚数は 1 以上である必要があります。")
+    if rows > image_height or columns > image_width:
+        raise ValueError("縦と横の枚数は画像のピクセル数以下にしてください。")
+
+    rects: List[tuple[int, int, int, int]] = []
+    for row in range(rows):
+        top = row * image_height // rows
+        bottom = (row + 1) * image_height // rows
+        for column in range(columns):
+            left = column * image_width // columns
+            right = (column + 1) * image_width // columns
+            rects.append((left, top, right - left, bottom - top))
+    return rects
+
+
+def build_sprite_sheet(
+    frames: Sequence[AnimationFrame],
+    rows: int,
+    columns: int,
+) -> QPixmap:
+    """フレームを行優先で並べたスプライトシートを生成する。"""
+    if not frames:
+        raise ValueError("出力するフレームがありません。")
+    if rows <= 0 or columns <= 0:
+        raise ValueError("縦と横の枚数は 1 以上である必要があります。")
+    if rows * columns < len(frames):
+        raise ValueError(
+            f"出力枠が不足しています。{len(frames)} フレーム以上になるように指定してください。"
+        )
+    if any(frame.pixmap.isNull() for frame in frames):
+        raise ValueError("読み込めないフレームが含まれています。")
+
+    cell_width = max(frame.pixmap.width() for frame in frames)
+    cell_height = max(frame.pixmap.height() for frame in frames)
+    sheet_width = cell_width * columns
+    sheet_height = cell_height * rows
+    if sheet_width * sheet_height > 100_000_000:
+        raise ValueError("出力画像が大きすぎます。縦または横の枚数を小さくしてください。")
+
+    sheet = QPixmap(sheet_width, sheet_height)
+    if sheet.isNull():
+        raise ValueError("スプライトシート用の画像を作成できませんでした。")
+    sheet.fill(Qt.transparent)
+
+    painter = QPainter(sheet)
+    for frame_index, frame in enumerate(frames):
+        row = frame_index // columns
+        column = frame_index % columns
+        x = column * cell_width + (cell_width - frame.pixmap.width()) // 2
+        y = row * cell_height + (cell_height - frame.pixmap.height()) // 2
+        painter.drawPixmap(x, y, frame.pixmap)
+    painter.end()
+    return sheet
 
 
 class FrameTableWidget(QTableWidget):
@@ -156,6 +224,22 @@ class AnimationDialog(QDialog):
         table_layout = QVBoxLayout()
         table_label = QLabel("読み込んでいる画像一覧とウェイトミリ秒")
         table_layout.addWidget(table_label)
+
+        sprite_layout = QHBoxLayout()
+        sprite_layout.addWidget(QLabel("読み込み時の分割:"))
+        sprite_layout.addWidget(QLabel("縦（行）"))
+        self.sprite_rows_spin = QSpinBox()
+        self.sprite_rows_spin.setRange(1, 1000)
+        self.sprite_rows_spin.setValue(1)
+        sprite_layout.addWidget(self.sprite_rows_spin)
+        sprite_layout.addWidget(QLabel("× 横（列）"))
+        self.sprite_columns_spin = QSpinBox()
+        self.sprite_columns_spin.setRange(1, 1000)
+        self.sprite_columns_spin.setValue(1)
+        sprite_layout.addWidget(self.sprite_columns_spin)
+        sprite_layout.addStretch(1)
+        table_layout.addLayout(sprite_layout)
+
         table_layout.addWidget(self.table)
 
         bulk_layout = QHBoxLayout()
@@ -168,6 +252,25 @@ class AnimationDialog(QDialog):
         bulk_layout.addWidget(self.bulk_wait_input)
         bulk_layout.addWidget(self.bulk_apply_button)
         table_layout.addLayout(bulk_layout)
+
+        export_layout = QHBoxLayout()
+        export_layout.addWidget(QLabel("シート出力:"))
+        export_layout.addWidget(QLabel("縦"))
+        self.export_rows_spin = QSpinBox()
+        self.export_rows_spin.setRange(1, 1000)
+        self.export_rows_spin.setValue(1)
+        self.export_rows_spin.setToolTip("出力する行数")
+        export_layout.addWidget(self.export_rows_spin)
+        export_layout.addWidget(QLabel("× 横"))
+        self.export_columns_spin = QSpinBox()
+        self.export_columns_spin.setRange(1, 1000)
+        self.export_columns_spin.setValue(1)
+        self.export_columns_spin.setToolTip("出力する列数")
+        export_layout.addWidget(self.export_columns_spin)
+        self.export_button = QPushButton("保存")
+        self.export_button.setToolTip("現在のフレームを1枚の画像として保存")
+        export_layout.addWidget(self.export_button)
+        table_layout.addLayout(export_layout)
 
         self.display_label = QLabel()
         self.display_label.setMinimumSize(320, 240)
@@ -198,6 +301,7 @@ class AnimationDialog(QDialog):
 
         self.bulk_apply_button.clicked.connect(self._apply_bulk_wait)
         self.bulk_wait_input.returnPressed.connect(self._apply_bulk_wait)
+        self.export_button.clicked.connect(self.export_sprite_sheet)
         self.up_button.clicked.connect(lambda: self._move_selected_row(-1))
         self.down_button.clicked.connect(lambda: self._move_selected_row(1))
         self.start_button.clicked.connect(self.start_animation)
@@ -211,18 +315,48 @@ class AnimationDialog(QDialog):
     # Frame management ----------------------------------------------------
     def add_image_files(self, paths: Sequence[str]) -> None:
         added_any = False
+        first_added_index = len(self.frames)
+        rows = self.sprite_rows_spin.value()
+        columns = self.sprite_columns_spin.value()
         for path in paths:
             if not os.path.isfile(path):
                 continue
             pixmap = QPixmap(path)
             if pixmap.isNull():
                 continue
-            frame = AnimationFrame(path=path, pixmap=pixmap, wait_ms=self.DEFAULT_WAIT_MS)
-            self.frames.append(frame)
-            self._append_table_row(frame)
-            added_any = True
+            try:
+                rects = calculate_frame_rects(pixmap.width(), pixmap.height(), rows, columns)
+            except ValueError:
+                continue
+            for frame_index, (x, y, width, height) in enumerate(rects):
+                if len(rects) == 1:
+                    display_name = os.path.basename(path)
+                else:
+                    frame_row = frame_index // columns + 1
+                    frame_column = frame_index % columns + 1
+                    display_name = f"{os.path.basename(path)} [{frame_row},{frame_column}]"
+                frame = AnimationFrame(
+                    path=path,
+                    pixmap=pixmap.copy(x, y, width, height),
+                    wait_ms=self.DEFAULT_WAIT_MS,
+                    display_name=display_name,
+                )
+                self.frames.append(frame)
+                self._append_table_row(frame)
+                added_any = True
         if added_any:
-            self._select_row(len(self.frames) - 1)
+            added_count = len(self.frames) - first_added_index
+            if first_added_index == 0:
+                if rows * columns == 1:
+                    suggested_rows = (added_count + 999) // 1000
+                    suggested_columns = min(added_count, 1000)
+                else:
+                    suggested_rows = (added_count + columns - 1) // columns
+                    suggested_columns = columns
+                self.export_rows_spin.setValue(min(suggested_rows, 1000))
+                self.export_columns_spin.setValue(min(suggested_columns, 1000))
+            selected_index = first_added_index if rows * columns > 1 else len(self.frames) - 1
+            self._select_row(selected_index)
             if not self.is_playing:
                 self.current_index = self.table.currentRow()
                 self._refresh_display()
@@ -254,7 +388,7 @@ class AnimationDialog(QDialog):
         self.table.blockSignals(True)
         self.table.insertRow(row)
 
-        file_item = QTableWidgetItem(os.path.basename(frame.path))
+        file_item = QTableWidgetItem(frame.display_name or os.path.basename(frame.path))
         file_item.setToolTip(frame.path)
         file_item.setFlags(file_item.flags() & ~Qt.ItemIsEditable)
 
@@ -288,7 +422,7 @@ class AnimationDialog(QDialog):
         self._refresh_display()
 
     def _populate_row(self, row: int, frame: AnimationFrame) -> None:
-        file_item = QTableWidgetItem(os.path.basename(frame.path))
+        file_item = QTableWidgetItem(frame.display_name or os.path.basename(frame.path))
         file_item.setToolTip(frame.path)
         file_item.setFlags(file_item.flags() & ~Qt.ItemIsEditable)
 
@@ -467,6 +601,9 @@ class AnimationDialog(QDialog):
         self.step_button.setEnabled(has_frames and not self.is_playing)
         self.bulk_apply_button.setEnabled(has_frames)
         self.bulk_wait_input.setEnabled(has_frames)
+        self.export_rows_spin.setEnabled(has_frames)
+        self.export_columns_spin.setEnabled(has_frames)
+        self.export_button.setEnabled(has_frames)
 
     def _refresh_wait_column(self) -> None:
         self.table.blockSignals(True)
@@ -497,6 +634,36 @@ class AnimationDialog(QDialog):
         if self.is_playing:
             self._start_timer_for_current()
         self.bulk_wait_input.setText(str(value))
+
+    def export_sprite_sheet(self) -> None:
+        if not self.frames:
+            return
+        try:
+            sheet = build_sprite_sheet(
+                self.frames,
+                self.export_rows_spin.value(),
+                self.export_columns_spin.value(),
+            )
+        except ValueError as error:
+            QMessageBox.warning(self, "スプライトシートを出力できません", str(error))
+            return
+
+        path, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "スプライトシートを保存",
+            "sprite_sheet.png",
+            "画像 (*.png *.webp *.jpg *.jpeg)",
+        )
+        if not path:
+            return
+        if not os.path.splitext(path)[1]:
+            path += ".png"
+        if not sheet.save(path):
+            QMessageBox.warning(
+                self,
+                "スプライトシートを出力できません",
+                "画像を保存できませんでした。保存先や拡張子を確認してください。",
+            )
 
 
 def main() -> None:
