@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
+    QComboBox,
     QDialog,
     QFileDialog,
     QGridLayout,
@@ -100,6 +101,30 @@ def build_sprite_sheet(
         painter.drawPixmap(x, y, frame.pixmap)
     painter.end()
     return sheet
+
+
+def build_numbered_frame_paths(
+    output_directory: str,
+    base_name: str,
+    frame_count: int,
+) -> List[str]:
+    """個別フレーム用の5刻みの出力パスを生成する。"""
+    normalized_name = base_name.strip()
+    if normalized_name.lower().endswith(".png"):
+        normalized_name = normalized_name[:-4].rstrip()
+    if not normalized_name:
+        raise ValueError("ファイル名を入力してください。")
+    if any(ord(character) < 32 or character in '<>:"/\\|?*' for character in normalized_name):
+        raise ValueError('ファイル名に < > : " / \\ | ? * は使用できません。')
+    if normalized_name.endswith((".", " ")):
+        raise ValueError("ファイル名の末尾にピリオドや空白は使用できません。")
+    if frame_count <= 0:
+        raise ValueError("出力するフレームがありません。")
+
+    return [
+        os.path.join(output_directory, f"{frame_number:03d}_{normalized_name}.png")
+        for frame_number in range(5, frame_count * 5 + 1, 5)
+    ]
 
 
 class FrameTableWidget(QTableWidget):
@@ -272,13 +297,20 @@ class AnimationDialog(QDialog):
         export_layout.addWidget(self.export_button)
         table_layout.addLayout(export_layout)
 
+        individual_export_layout = QHBoxLayout()
+        individual_export_layout.addWidget(QLabel("個別PNG出力:"))
+        self.individual_export_button = QPushButton("保存")
+        self.individual_export_button.setToolTip(
+            "ベース名を指定し、各フレームを005から5刻みの連番で保存"
+        )
+        individual_export_layout.addWidget(self.individual_export_button)
+        individual_export_layout.addStretch(1)
+        table_layout.addLayout(individual_export_layout)
+
         self.display_label = QLabel()
         self.display_label.setMinimumSize(320, 240)
         self.display_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.display_label.setAlignment(Qt.AlignCenter)
-        self.display_label.setStyleSheet(
-            "background-color: #202020; border: 1px solid #3a3a3a; color: #aaaaaa;"
-        )
         self.zoom_spin = QSpinBox()
         self.zoom_spin.setRange(10, 800)
         self.zoom_spin.setSingleStep(10)
@@ -287,6 +319,12 @@ class AnimationDialog(QDialog):
         zoom_layout = QHBoxLayout()
         zoom_layout.addWidget(QLabel("表示倍率:"))
         zoom_layout.addWidget(self.zoom_spin)
+        zoom_layout.addWidget(QLabel("透明部分の背景:"))
+        self.preview_background_combo = QComboBox()
+        self.preview_background_combo.addItem("黒", "black")
+        self.preview_background_combo.addItem("白", "white")
+        self.preview_background_combo.setToolTip("透明部分を確認するためのプレビュー背景色")
+        zoom_layout.addWidget(self.preview_background_combo)
         zoom_layout.addStretch(1)
 
         display_layout = QVBoxLayout()
@@ -302,12 +340,17 @@ class AnimationDialog(QDialog):
         self.bulk_apply_button.clicked.connect(self._apply_bulk_wait)
         self.bulk_wait_input.returnPressed.connect(self._apply_bulk_wait)
         self.export_button.clicked.connect(self.export_sprite_sheet)
+        self.individual_export_button.clicked.connect(self.export_individual_frames)
         self.up_button.clicked.connect(lambda: self._move_selected_row(-1))
         self.down_button.clicked.connect(lambda: self._move_selected_row(1))
         self.start_button.clicked.connect(self.start_animation)
         self.stop_button.clicked.connect(self.stop_animation)
         self.step_button.clicked.connect(self.step_frame)
         self.zoom_spin.valueChanged.connect(self._on_zoom_changed)
+        self.preview_background_combo.currentIndexChanged.connect(
+            self._on_preview_background_changed
+        )
+        self._on_preview_background_changed()
         selection_model = self.table.selectionModel()
         if selection_model:
             selection_model.selectionChanged.connect(self._on_selection_changed)
@@ -577,6 +620,19 @@ class AnimationDialog(QDialog):
     def _on_zoom_changed(self, _value: int) -> None:
         self._refresh_display()
 
+    def _on_preview_background_changed(self, _index: int = 0) -> None:
+        if self.preview_background_combo.currentData() == "white":
+            background_color = "#ffffff"
+            text_color = "#333333"
+        else:
+            background_color = "#000000"
+            text_color = "#dddddd"
+        self.display_label.setStyleSheet(
+            f"background-color: {background_color}; "
+            "border: 1px solid #3a3a3a; "
+            f"color: {text_color};"
+        )
+
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         if self.frames and self.current_pixmap:
@@ -604,6 +660,7 @@ class AnimationDialog(QDialog):
         self.export_rows_spin.setEnabled(has_frames)
         self.export_columns_spin.setEnabled(has_frames)
         self.export_button.setEnabled(has_frames)
+        self.individual_export_button.setEnabled(has_frames)
 
     def _refresh_wait_column(self) -> None:
         self.table.blockSignals(True)
@@ -664,6 +721,52 @@ class AnimationDialog(QDialog):
                 "スプライトシートを出力できません",
                 "画像を保存できませんでした。保存先や拡張子を確認してください。",
             )
+
+    def export_individual_frames(self) -> None:
+        if not self.frames:
+            return
+
+        selected_path, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "個別PNGのファイル名と保存先を指定",
+            "frame.png",
+            "PNG画像 (*.png)",
+        )
+        if not selected_path:
+            return
+
+        output_directory = os.path.dirname(selected_path) or os.getcwd()
+        base_name = os.path.basename(selected_path)
+        try:
+            output_paths = build_numbered_frame_paths(
+                output_directory,
+                base_name,
+                len(self.frames),
+            )
+        except ValueError as error:
+            QMessageBox.warning(self, "個別PNGを出力できません", str(error))
+            return
+
+        existing_paths = [path for path in output_paths if os.path.exists(path)]
+        if existing_paths:
+            answer = QMessageBox.question(
+                self,
+                "既存ファイルの上書き確認",
+                f"同名のファイルが {len(existing_paths)} 件あります。上書きしますか？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+
+        for frame, output_path in zip(self.frames, output_paths):
+            if frame.pixmap.isNull() or not frame.pixmap.save(output_path, "PNG"):
+                QMessageBox.warning(
+                    self,
+                    "個別PNGを出力できません",
+                    f"画像を保存できませんでした。\n{output_path}",
+                )
+                return
 
 
 def main() -> None:

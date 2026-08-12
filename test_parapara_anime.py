@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QApplication
 from parapara_anime import (
     AnimationDialog,
     AnimationFrame,
+    build_numbered_frame_paths,
     build_sprite_sheet,
     calculate_frame_rects,
 )
@@ -41,6 +42,31 @@ class CalculateFrameRectsTests(unittest.TestCase):
             calculate_frame_rects(5, 5, 2, 2),
             [(0, 0, 2, 2), (2, 0, 3, 2), (0, 2, 2, 3), (2, 2, 3, 3)],
         )
+
+
+class BuildNumberedFramePathsTests(unittest.TestCase):
+    def test_uses_three_digit_numbers_starting_at_five_in_steps_of_five(self) -> None:
+        paths = build_numbered_frame_paths("output", "abc", 3)
+
+        self.assertEqual(
+            paths,
+            [
+                os.path.join("output", "005_abc.png"),
+                os.path.join("output", "010_abc.png"),
+                os.path.join("output", "015_abc.png"),
+            ],
+        )
+
+    def test_removes_png_extension_from_base_name(self) -> None:
+        paths = build_numbered_frame_paths("output", "abc.png", 1)
+
+        self.assertEqual(paths, [os.path.join("output", "005_abc.png")])
+
+    def test_rejects_empty_or_invalid_base_name(self) -> None:
+        for base_name in ("", "   ", "abc/def", "abc:def", "abc."):
+            with self.subTest(base_name=base_name):
+                with self.assertRaises(ValueError):
+                    build_numbered_frame_paths("output", base_name, 1)
 
 
 class AddSpriteSheetTests(unittest.TestCase):
@@ -141,6 +167,41 @@ class AddSpriteSheetTests(unittest.TestCase):
         output_path = f"{output_without_extension}.png"
         self.assertTrue(os.path.isfile(output_path))
         self.assertEqual(QImage(output_path).size().toTuple(), (10, 6))
+
+    def test_preview_background_can_switch_between_black_and_white(self) -> None:
+        self.assertEqual(self.dialog.preview_background_combo.currentData(), "black")
+        self.assertIn("background-color: #000000", self.dialog.display_label.styleSheet())
+
+        white_index = self.dialog.preview_background_combo.findData("white")
+        self.dialog.preview_background_combo.setCurrentIndex(white_index)
+
+        self.assertIn("background-color: #ffffff", self.dialog.display_label.styleSheet())
+
+    def test_export_individual_frames_uses_numbered_names_and_keeps_transparency(self) -> None:
+        transparent_image = QImage(2, 2, QImage.Format_ARGB32)
+        transparent_image.fill(QColor(0, 0, 0, 0))
+        transparent_image.setPixelColor(0, 0, QColor("red"))
+        green_image = QImage(2, 2, QImage.Format_ARGB32)
+        green_image.fill(QColor("green"))
+        self.dialog.frames = [
+            AnimationFrame("red", QPixmap.fromImage(transparent_image), 200),
+            AnimationFrame("green", QPixmap.fromImage(green_image), 200),
+        ]
+        selected_path = os.path.join(self.temp_dir.name, "abc.png")
+
+        with patch(
+            "parapara_anime.QFileDialog.getSaveFileName",
+            return_value=(selected_path, ""),
+        ):
+            self.dialog.export_individual_frames()
+
+        first_output = QImage(os.path.join(self.temp_dir.name, "005_abc.png"))
+        second_output = QImage(os.path.join(self.temp_dir.name, "010_abc.png"))
+        self.assertFalse(first_output.isNull())
+        self.assertFalse(second_output.isNull())
+        self.assertEqual(first_output.pixelColor(0, 0), QColor("red"))
+        self.assertEqual(first_output.pixelColor(1, 1).alpha(), 0)
+        self.assertEqual(second_output.pixelColor(0, 0), QColor("green"))
 
 
 if __name__ == "__main__":
