@@ -5,8 +5,9 @@ import sys
 from dataclasses import dataclass
 from typing import List, Optional, Sequence
 
+from PIL import Image
 from PySide6.QtCore import Qt, QMimeData, QTimer
-from PySide6.QtGui import QImageReader, QIntValidator, QKeyEvent, QPainter, QPixmap
+from PySide6.QtGui import QImage, QImageReader, QIntValidator, QKeyEvent, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -125,6 +126,61 @@ def build_numbered_frame_paths(
         os.path.join(output_directory, f"{frame_number:03d}_{normalized_name}.png")
         for frame_number in range(5, frame_count * 5 + 1, 5)
     ]
+
+
+def save_animation_gif(
+    frames: Sequence[AnimationFrame],
+    output_path: str,
+    loop: bool,
+) -> None:
+    """一覧順、待ち時間、ループ設定を反映したGIFを保存する。"""
+    if not frames:
+        raise ValueError("出力するフレームがありません。")
+    if any(frame.pixmap.isNull() for frame in frames):
+        raise ValueError("読み込めないフレームが含まれています。")
+    if any(frame.wait_ms < 0 for frame in frames):
+        raise ValueError("待ち時間は 0 ミリ秒以上にしてください。")
+    if any(frame.wait_ms > 655_350 for frame in frames):
+        raise ValueError("GIFの待ち時間は1フレームあたり655350ミリ秒以下にしてください。")
+
+    canvas_width = max(frame.pixmap.width() for frame in frames)
+    canvas_height = max(frame.pixmap.height() for frame in frames)
+    if canvas_width > 65_535 or canvas_height > 65_535:
+        raise ValueError("GIFの縦横サイズは65535ピクセル以下にしてください。")
+    if canvas_width * canvas_height * len(frames) > 100_000_000:
+        raise ValueError("GIFが大きすぎます。画像サイズまたはフレーム数を減らしてください。")
+
+    gif_frames: List[Image.Image] = []
+    for frame in frames:
+        source = frame.pixmap.toImage().convertToFormat(QImage.Format_RGBA8888)
+        image = Image.frombytes(
+            "RGBA",
+            (source.width(), source.height()),
+            source.constBits().tobytes(),
+            "raw",
+            "RGBA",
+            source.bytesPerLine(),
+            1,
+        )
+        canvas = Image.new("RGBA", (canvas_width, canvas_height), (0, 0, 0, 0))
+        position = (
+            (canvas_width - image.width) // 2,
+            (canvas_height - image.height) // 2,
+        )
+        canvas.alpha_composite(image, position)
+        gif_frames.append(canvas)
+
+    save_options = {
+        "format": "GIF",
+        "save_all": True,
+        "append_images": gif_frames[1:],
+        "duration": [frame.wait_ms for frame in frames],
+        "disposal": 2,
+        "optimize": False,
+    }
+    if loop:
+        save_options["loop"] = 0
+    gif_frames[0].save(output_path, **save_options)
 
 
 class FrameTableWidget(QTableWidget):
@@ -307,6 +363,16 @@ class AnimationDialog(QDialog):
         individual_export_layout.addStretch(1)
         table_layout.addLayout(individual_export_layout)
 
+        gif_export_layout = QHBoxLayout()
+        gif_export_layout.addWidget(QLabel("GIFアニメ出力:"))
+        self.gif_export_button = QPushButton("保存")
+        self.gif_export_button.setToolTip(
+            "一覧順、待ち時間、ループ設定を反映したGIFアニメーションを保存"
+        )
+        gif_export_layout.addWidget(self.gif_export_button)
+        gif_export_layout.addStretch(1)
+        table_layout.addLayout(gif_export_layout)
+
         self.display_label = QLabel()
         self.display_label.setMinimumSize(320, 240)
         self.display_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -341,6 +407,7 @@ class AnimationDialog(QDialog):
         self.bulk_wait_input.returnPressed.connect(self._apply_bulk_wait)
         self.export_button.clicked.connect(self.export_sprite_sheet)
         self.individual_export_button.clicked.connect(self.export_individual_frames)
+        self.gif_export_button.clicked.connect(self.export_animation_gif)
         self.up_button.clicked.connect(lambda: self._move_selected_row(-1))
         self.down_button.clicked.connect(lambda: self._move_selected_row(1))
         self.start_button.clicked.connect(self.start_animation)
@@ -661,6 +728,7 @@ class AnimationDialog(QDialog):
         self.export_columns_spin.setEnabled(has_frames)
         self.export_button.setEnabled(has_frames)
         self.individual_export_button.setEnabled(has_frames)
+        self.gif_export_button.setEnabled(has_frames)
 
     def _refresh_wait_column(self) -> None:
         self.table.blockSignals(True)
@@ -767,6 +835,34 @@ class AnimationDialog(QDialog):
                     f"画像を保存できませんでした。\n{output_path}",
                 )
                 return
+
+    def export_animation_gif(self) -> None:
+        if not self.frames:
+            return
+
+        output_path, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "GIFアニメーションを保存",
+            "animation.gif",
+            "GIFアニメーション (*.gif)",
+        )
+        if not output_path:
+            return
+        if os.path.splitext(output_path)[1].lower() != ".gif":
+            output_path += ".gif"
+
+        try:
+            save_animation_gif(
+                self.frames,
+                output_path,
+                self.loop_checkbox.isChecked(),
+            )
+        except (OSError, ValueError) as error:
+            QMessageBox.warning(
+                self,
+                "GIFアニメーションを出力できません",
+                f"GIFを保存できませんでした。\n{error}",
+            )
 
 
 def main() -> None:

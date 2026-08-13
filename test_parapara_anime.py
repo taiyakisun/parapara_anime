@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PIL import Image as PilImage
 from PySide6.QtGui import QColor, QImage, QPixmap
 from PySide6.QtWidgets import QApplication
 
@@ -14,6 +15,7 @@ from parapara_anime import (
     build_numbered_frame_paths,
     build_sprite_sheet,
     calculate_frame_rects,
+    save_animation_gif,
 )
 
 
@@ -202,6 +204,63 @@ class AddSpriteSheetTests(unittest.TestCase):
         self.assertEqual(first_output.pixelColor(0, 0), QColor("red"))
         self.assertEqual(first_output.pixelColor(1, 1).alpha(), 0)
         self.assertEqual(second_output.pixelColor(0, 0), QColor("green"))
+
+    def test_save_animation_gif_keeps_order_wait_loop_transparency_and_centering(self) -> None:
+        large_image = QImage(4, 4, QImage.Format_ARGB32)
+        large_image.fill(QColor(0, 0, 0, 0))
+        large_image.setPixelColor(0, 0, QColor("red"))
+        small_image = QImage(2, 2, QImage.Format_ARGB32)
+        small_image.fill(QColor("blue"))
+        frames = [
+            AnimationFrame("red", QPixmap.fromImage(large_image), 120),
+            AnimationFrame("blue", QPixmap.fromImage(small_image), 340),
+        ]
+        output_path = os.path.join(self.temp_dir.name, "animation.gif")
+
+        save_animation_gif(frames, output_path, loop=True)
+
+        with PilImage.open(output_path) as animation:
+            self.assertEqual(animation.n_frames, 2)
+            self.assertEqual(animation.size, (4, 4))
+            self.assertEqual(animation.info.get("loop"), 0)
+
+            animation.seek(0)
+            first_frame = animation.convert("RGBA")
+            self.assertEqual(animation.info.get("duration"), 120)
+            self.assertEqual(first_frame.getpixel((0, 0)), (255, 0, 0, 255))
+            self.assertEqual(first_frame.getpixel((3, 3))[3], 0)
+
+            animation.seek(1)
+            second_frame = animation.convert("RGBA")
+            self.assertEqual(animation.info.get("duration"), 340)
+            self.assertEqual(second_frame.getpixel((1, 1)), (0, 0, 255, 255))
+            self.assertEqual(second_frame.getpixel((0, 0))[3], 0)
+
+    def test_export_animation_gif_adds_extension_and_uses_non_loop_setting(self) -> None:
+        self.dialog.add_image_files([self.image_path])
+        output_without_extension = os.path.join(self.temp_dir.name, "animation")
+
+        with patch(
+            "parapara_anime.QFileDialog.getSaveFileName",
+            return_value=(output_without_extension, ""),
+        ):
+            self.dialog.export_animation_gif()
+
+        with PilImage.open(f"{output_without_extension}.gif") as animation:
+            self.assertEqual(animation.n_frames, 1)
+            self.assertNotIn("loop", animation.info)
+
+    def test_save_animation_gif_rejects_empty_frames_and_excessive_wait(self) -> None:
+        output_path = os.path.join(self.temp_dir.name, "animation.gif")
+
+        with self.assertRaisesRegex(ValueError, "フレームがありません"):
+            save_animation_gif([], output_path, loop=False)
+
+        image = QImage(1, 1, QImage.Format_ARGB32)
+        image.fill(QColor("red"))
+        frame = AnimationFrame("red", QPixmap.fromImage(image), 655_351)
+        with self.assertRaisesRegex(ValueError, "655350"):
+            save_animation_gif([frame], output_path, loop=False)
 
 
 if __name__ == "__main__":
