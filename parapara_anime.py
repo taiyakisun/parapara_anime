@@ -37,6 +37,9 @@ class AnimationFrame:
     pixmap: QPixmap
     wait_ms: int
     display_name: str = ""
+    source_rows: int = 1
+    source_columns: int = 1
+    source_index: int = 0
 
 
 def calculate_frame_rects(
@@ -283,16 +286,28 @@ class AnimationDialog(QDialog):
 
         self.up_button = QPushButton("上へ")
         self.down_button = QPushButton("下へ")
+        self.reload_button = QPushButton("画像再読込")
+        self.reload_button.setToolTip(
+            "並び順や待ち時間を保ったまま、元の画像ファイルを読み直す"
+        )
         self.start_button = QPushButton("Start")
         self.stop_button = QPushButton("Stop")
         self.step_button = QPushButton("コマ送り")
         self.loop_checkbox = QCheckBox("ループ")
 
-        for button in (self.up_button, self.down_button, self.start_button, self.stop_button, self.step_button):
+        for button in (
+            self.up_button,
+            self.down_button,
+            self.reload_button,
+            self.start_button,
+            self.stop_button,
+            self.step_button,
+        ):
             button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
 
         control_layout.addWidget(self.up_button)
         control_layout.addWidget(self.down_button)
+        control_layout.addWidget(self.reload_button)
         control_layout.addWidget(self.start_button)
         control_layout.addWidget(self.stop_button)
         control_layout.addWidget(self.step_button)
@@ -410,6 +425,7 @@ class AnimationDialog(QDialog):
         self.gif_export_button.clicked.connect(self.export_animation_gif)
         self.up_button.clicked.connect(lambda: self._move_selected_row(-1))
         self.down_button.clicked.connect(lambda: self._move_selected_row(1))
+        self.reload_button.clicked.connect(self.reload_images)
         self.start_button.clicked.connect(self.start_animation)
         self.stop_button.clicked.connect(self.stop_animation)
         self.step_button.clicked.connect(self.step_frame)
@@ -450,6 +466,9 @@ class AnimationDialog(QDialog):
                     pixmap=pixmap.copy(x, y, width, height),
                     wait_ms=self.DEFAULT_WAIT_MS,
                     display_name=display_name,
+                    source_rows=rows,
+                    source_columns=columns,
+                    source_index=frame_index,
                 )
                 self.frames.append(frame)
                 self._append_table_row(frame)
@@ -471,6 +490,66 @@ class AnimationDialog(QDialog):
                 self.current_index = self.table.currentRow()
                 self._refresh_display()
         self._update_button_states()
+
+    def reload_images(self) -> None:
+        if not self.frames:
+            return
+
+        source_pixmaps: dict[str, QPixmap] = {}
+        source_rects: dict[tuple[str, int, int], List[tuple[int, int, int, int]]] = {}
+        failed_paths: set[str] = set()
+        updates: List[tuple[AnimationFrame, QPixmap]] = []
+
+        for frame in self.frames:
+            if frame.path not in source_pixmaps and frame.path not in failed_paths:
+                reader = QImageReader(frame.path)
+                image = reader.read()
+                if image.isNull():
+                    failed_paths.add(frame.path)
+                else:
+                    source_pixmaps[frame.path] = QPixmap.fromImage(image)
+
+            source_pixmap = source_pixmaps.get(frame.path)
+            if source_pixmap is None:
+                continue
+
+            rect_key = (frame.path, frame.source_rows, frame.source_columns)
+            if rect_key not in source_rects:
+                try:
+                    source_rects[rect_key] = calculate_frame_rects(
+                        source_pixmap.width(),
+                        source_pixmap.height(),
+                        frame.source_rows,
+                        frame.source_columns,
+                    )
+                except ValueError:
+                    failed_paths.add(frame.path)
+                    continue
+
+            rects = source_rects[rect_key]
+            if frame.source_index < 0 or frame.source_index >= len(rects):
+                failed_paths.add(frame.path)
+                continue
+            updates.append(
+                (
+                    frame,
+                    source_pixmap.copy(*rects[frame.source_index]),
+                )
+            )
+
+        for frame, pixmap in updates:
+            frame.pixmap = pixmap
+
+        self._display_current_frame()
+
+        if failed_paths:
+            paths = "\n".join(sorted(failed_paths))
+            QMessageBox.warning(
+                self,
+                "再読み込みできない画像",
+                "次の画像は再読み込みできなかったため、現在の表示を維持しました。\n"
+                f"{paths}",
+            )
 
     def remove_selected_rows(self) -> None:
         if self.table.selectedItems():
@@ -719,6 +798,7 @@ class AnimationDialog(QDialog):
         has_frames = bool(self.frames)
         self.up_button.setEnabled(has_frames)
         self.down_button.setEnabled(has_frames)
+        self.reload_button.setEnabled(has_frames)
         self.start_button.setEnabled(has_frames and not self.is_playing)
         self.stop_button.setEnabled(self.is_playing)
         self.step_button.setEnabled(has_frames and not self.is_playing)

@@ -112,6 +112,67 @@ class AddSpriteSheetTests(unittest.TestCase):
         self.assertEqual(self.dialog.export_rows_spin.value(), 2)
         self.assertEqual(self.dialog.export_columns_spin.value(), 5)
 
+    def test_reload_updates_image_while_preserving_frame_state(self) -> None:
+        self.dialog.sprite_columns_spin.setValue(2)
+        self.dialog.add_image_files([self.image_path])
+        self.dialog.frames[0].wait_ms = 120
+        self.dialog.frames[1].wait_ms = 340
+        self.dialog._refresh_wait_column()
+        self.dialog._select_row(1)
+        self.dialog._move_selected_row(-1)
+        self.dialog.sprite_columns_spin.setValue(1)
+        self.dialog.start_animation()
+
+        updated_image = QImage(12, 8, QImage.Format_ARGB32)
+        updated_image.fill(QColor("blue"))
+        for x in range(6, 12):
+            for y in range(8):
+                updated_image.setPixelColor(x, y, QColor("green"))
+        self.assertTrue(updated_image.save(self.image_path))
+
+        self.dialog.reload_button.click()
+
+        self.assertEqual([frame.source_index for frame in self.dialog.frames], [1, 0])
+        self.assertEqual([frame.wait_ms for frame in self.dialog.frames], [340, 120])
+        self.assertEqual(self.dialog.current_index, 0)
+        self.assertEqual(self.dialog.table.currentRow(), 0)
+        self.assertTrue(self.dialog.is_playing)
+        self.assertTrue(self.dialog.timer.isActive())
+        self.assertEqual(self.dialog.frames[0].pixmap.size().toTuple(), (6, 8))
+        self.assertEqual(
+            self.dialog.frames[0].pixmap.toImage().pixelColor(0, 0),
+            QColor("green"),
+        )
+        self.assertEqual(
+            self.dialog.frames[1].pixmap.toImage().pixelColor(0, 0),
+            QColor("blue"),
+        )
+        self.assertEqual(
+            self.dialog.current_pixmap.toImage().pixelColor(0, 0),
+            QColor("green"),
+        )
+
+    def test_reload_keeps_old_image_and_warns_when_source_is_missing(self) -> None:
+        self.dialog.add_image_files([self.image_path])
+        original_color = self.dialog.frames[0].pixmap.toImage().pixelColor(0, 0)
+        os.remove(self.image_path)
+
+        with patch("parapara_anime.QMessageBox.warning") as warning:
+            self.dialog.reload_images()
+
+        self.assertEqual(
+            self.dialog.frames[0].pixmap.toImage().pixelColor(0, 0),
+            original_color,
+        )
+        warning.assert_called_once()
+
+    def test_reload_button_is_enabled_only_when_images_are_loaded(self) -> None:
+        self.assertFalse(self.dialog.reload_button.isEnabled())
+
+        self.dialog.add_image_files([self.image_path])
+
+        self.assertTrue(self.dialog.reload_button.isEnabled())
+
     def test_build_sprite_sheet_uses_row_major_order_and_transparent_remainder(self) -> None:
         frames = []
         for color_name in ("red", "green", "blue"):
